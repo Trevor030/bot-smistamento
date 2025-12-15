@@ -1,8 +1,8 @@
 services:
   sorting-hat-bot:
     build: .
+    container_name: sorting-hat-quiz-bot
     restart: unless-stopped
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN}
-      CLIENT_ID: ${CLIENT_ID}
-      GUILD_ID: ${GUILD_ID}
+      QUIZ_CHANNEL_ID: ${QUIZ_CHANNEL_ID}
