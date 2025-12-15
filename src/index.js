@@ -5,7 +5,8 @@ const {
   Partials,
   ActionRowBuilder,
   ButtonBuilder,
-  ButtonStyle
+  ButtonStyle,
+  PermissionsBitField
 } = require("discord.js");
 
 // ===== ENV =====
@@ -66,7 +67,7 @@ function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
-// Sessioni quiz in memoria (semplice)
+// Sessioni quiz in memoria
 const sessions = new Map(); // userId -> { step, scores, createdAt }
 
 // Timeout sessione (5 minuti)
@@ -122,12 +123,19 @@ function sessionValid(s) {
   return s && (Date.now() - s.createdAt) <= SESSION_TTL_MS;
 }
 
+async function postQuizInvite(guild, targetMember) {
+  const channel = await guild.channels.fetch(QUIZ_CHANNEL_ID).catch(() => null);
+  if (!channel) throw new Error("Quiz channel not found (check QUIZ_CHANNEL_ID).");
+
+  await channel.send({
+    content: `🎩 ${targetMember} il Cappello Parlante ti aspetta. Clicca per iniziare!`,
+    components: [makeStartRow(targetMember.id)]
+  });
+}
+
 // ===== CLIENT =====
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
   partials: [Partials.GuildMember]
 });
 
@@ -136,7 +144,7 @@ client.once("ready", () => {
   console.log(`➡️ Quiz channel id: ${QUIZ_CHANNEL_ID}`);
 });
 
-// 1) Quando entra un utente: manda messaggio nel canale quiz
+// Quando entra un utente: manda messaggio nel canale quiz
 client.on("guildMemberAdd", async (member) => {
   try {
     const channel = await member.guild.channels.fetch(QUIZ_CHANNEL_ID).catch(() => null);
@@ -151,9 +159,43 @@ client.on("guildMemberAdd", async (member) => {
   }
 });
 
-// 2) Bottoni quiz
 client.on("interactionCreate", async (interaction) => {
   try {
+    // ===== Slash command: /resetcasa =====
+    if (interaction.isChatInputCommand()) {
+      if (interaction.commandName !== "resetcasa") return;
+
+      // permessi: Manage Roles o Admin
+      const ok =
+        interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageRoles) ||
+        interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
+
+      if (!ok) {
+        return interaction.reply({ content: "Solo mod/admin possono usare **/resetcasa**.", ephemeral: true });
+      }
+
+      const user = interaction.options.getUser("utente", true);
+      const guild = interaction.guild;
+      if (!guild) return interaction.reply({ content: "Questo comando funziona solo in un server.", ephemeral: true });
+
+      const targetMember = await guild.members.fetch(user.id);
+
+      // reset sessione quiz (se c'è)
+      sessions.delete(user.id);
+
+      // rimuovi ruoli casa
+      await removeOtherHouseRoles(targetMember);
+
+      // riposta invito quiz
+      await postQuizInvite(guild, targetMember);
+
+      return interaction.reply({
+        content: `✅ Casa rimossa per ${targetMember}. Ho ripubblicato il quiz nel canale.`,
+        ephemeral: true
+      });
+    }
+
+    // ===== Bottoni quiz =====
     if (!interaction.isButton()) return;
 
     const id = interaction.customId;
@@ -166,12 +208,12 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply({ content: "Questo quiz non è per te 👀", ephemeral: true });
       }
 
-      // Se già ha una casa, blocca (evita resmisti)
+      // Se già ha una casa, blocca
       const member = interaction.member;
       const alreadyHouse = member?.roles?.cache?.some(r => HOUSES.includes(r.name));
       if (alreadyHouse) {
         return interaction.reply({
-          content: "Hai già una Casa! Se vuoi cambiare, chiedi a un mod di rimuovere il ruolo casa.",
+          content: "Hai già una Casa! Se vuoi cambiare, chiedi a un mod di usare **/resetcasa**.",
           ephemeral: true
         });
       }
@@ -198,15 +240,13 @@ client.on("interactionCreate", async (interaction) => {
       if (!sessionValid(session) || session.step !== step) {
         sessions.delete(targetUserId);
         return interaction.reply({
-          content: "Sessione scaduta o non valida. Riclicca **Inizia il quiz** nel messaggio di benvenuto.",
+          content: "Sessione scaduta o non valida. Riclicca **Inizia il quiz** nel messaggio del canale.",
           ephemeral: true
         });
       }
 
       const chosen = QUESTIONS[step].answers[idx];
-      if (!chosen) {
-        return interaction.reply({ content: "Risposta non valida.", ephemeral: true });
-      }
+      if (!chosen) return interaction.reply({ content: "Risposta non valida.", ephemeral: true });
 
       session.scores[chosen.house] += 1;
 
@@ -232,25 +272,19 @@ client.on("interactionCreate", async (interaction) => {
       const finalHouse = pickRandom(top);
 
       const guild = interaction.guild;
-      if (!guild) {
-        return interaction.update({ content: "Errore: questo comando funziona solo in server.", components: [] });
-      }
+      if (!guild) return interaction.update({ content: "Errore: solo in server.", components: [] });
 
       const member = await guild.members.fetch(targetUserId);
 
-      // Rimuovi altre case (sicurezza)
       await removeOtherHouseRoles(member);
 
-      // Crea ruolo se manca + assegna
       const role = await ensureRole(guild, finalHouse);
       await member.roles.add(role);
 
       const hatLine = pickRandom(HAT_LINES);
 
       return interaction.update({
-        content:
-          `🎩 **Cappello Parlante:** "${hatLine}"\n` +
-          `✨ ${member} sei… **${finalHouse.toUpperCase()}**!`,
+        content: `🎩 **Cappello Parlante:** "${hatLine}"\n✨ ${member} sei… **${finalHouse.toUpperCase()}**!`,
         components: []
       });
     }
