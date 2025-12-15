@@ -6,3 +6,5 @@ services:
     environment:
       DISCORD_TOKEN: ${DISCORD_TOKEN}
       QUIZ_CHANNEL_ID: ${QUIZ_CHANNEL_ID}
+      CLIENT_ID: ${CLIENT_ID}
+      GUILD_ID: ${GUILD_ID}
