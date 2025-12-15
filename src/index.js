@@ -21,10 +21,10 @@ if (!DISCORD_TOKEN || !QUIZ_CHANNEL_ID) {
 
 // ===== CASE (NOMI ESATTI) =====
 const HOUSES = {
-  Grifondoro: "🔴 ❤️ 🦁 Grifondoro",
-  Serpeverde: "🟢 💚 🐍 Serpeverde",
-  Corvonero: "🔵 💙 🦅 Corvonero",
-  Tassorosso: "🟡 💛 🦡 Tassorosso"
+  Grifondoro: "❤️ 🦁 Grifondoro",
+  Serpeverde: "💚 🐍 Serpeverde",
+  Corvonero: "💙 🦅 Corvonero",
+  Tassorosso: "💛 🦡 Tassorosso"
 };
 
 const HOUSE_KEYS = Object.keys(HOUSES);
