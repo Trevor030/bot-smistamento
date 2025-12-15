@@ -19,9 +19,17 @@ if (!DISCORD_TOKEN || !QUIZ_CHANNEL_ID) {
   process.exit(1);
 }
 
-// ===== CONFIG =====
-const HOUSES = ["Grifondoro", "Serpeverde", "Corvonero", "Tassorosso"];
+// ===== CASE (NOMI ESATTI) =====
+const HOUSES = {
+  Grifondoro: "🔴 ❤️ 🦁 Grifondoro",
+  Serpeverde: "🟢 💚 🐍 Serpeverde",
+  Corvonero: "🔵 💙 🦅 Corvonero",
+  Tassorosso: "🟡 💛 🦡 Tassorosso"
+};
 
+const HOUSE_KEYS = Object.keys(HOUSES);
+
+// ===== QUIZ =====
 const QUESTIONS = [
   {
     text: "🏰 **Benvenuto a Hogwarts!** Cosa ti attira di più?",
@@ -53,9 +61,9 @@ const QUESTIONS = [
 ];
 
 const HAT_LINES = [
-  "Hmm… interessante… molto interessante…",
-  "Vedo qualità rare in te…",
-  "La scelta non è banale…",
+  "Hmm… interessante…",
+  "Vedo grandi qualità in te…",
+  "La scelta non è facile…",
   "Il Cappello ha deciso!"
 ];
 
@@ -63,9 +71,7 @@ const HAT_LINES = [
 const sessions = new Map();
 
 // ===== HELPERS =====
-function pickRandom(arr) {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 
 function makeStartRow(userId) {
   return new ActionRowBuilder().addComponents(
@@ -89,15 +95,22 @@ function makeAnswersRow(userId, step) {
   return row;
 }
 
-async function ensureRole(guild, name) {
-  let role = guild.roles.cache.find(r => r.name === name);
-  if (!role) role = await guild.roles.create({ name });
+async function getHouseRole(guild, houseKey) {
+  const roleName = HOUSES[houseKey];
+  const role = guild.roles.cache.find(r => r.name === roleName);
+  if (!role) {
+    throw new Error(`Ruolo non trovato: ${roleName}`);
+  }
   return role;
 }
 
 async function removeHouseRoles(member) {
-  const toRemove = member.roles.cache.filter(r => HOUSES.includes(r.name));
-  if (toRemove.size) await member.roles.remove([...toRemove.values()]);
+  const toRemove = member.roles.cache.filter(r =>
+    Object.values(HOUSES).includes(r.name)
+  );
+  if (toRemove.size) {
+    await member.roles.remove([...toRemove.values()]);
+  }
 }
 
 // ===== CLIENT =====
@@ -134,19 +147,16 @@ client.on("messageCreate", async (message) => {
   const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
   const command = args.shift()?.toLowerCase();
 
-  // !resetcasa @utente
   if (command === "resetcasa") {
     if (
       !message.member.permissions.has(PermissionsBitField.Flags.ManageRoles) &&
       !message.member.permissions.has(PermissionsBitField.Flags.Administrator)
     ) {
-      return message.reply("❌ Non hai i permessi per usare questo comando.");
+      return message.reply("❌ Non hai i permessi.");
     }
 
     const target = message.mentions.members.first();
-    if (!target) {
-      return message.reply("❗ Usa: `!resetcasa @utente`");
-    }
+    if (!target) return message.reply("Usa: `!resetcasa @utente`");
 
     sessions.delete(target.id);
     await removeHouseRoles(target);
@@ -161,20 +171,21 @@ client.on("messageCreate", async (message) => {
   }
 });
 
-// ===== QUIZ BUTTONS =====
+// ===== QUIZ =====
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isButton()) return;
 
-  const parts = interaction.customId.split(":");
-  const userId = parts[1];
-
+  const [type, userId, stepStr, idxStr] = interaction.customId.split(":");
   if (interaction.user.id !== userId) {
     return interaction.reply({ content: "Questo quiz non è per te 👀", ephemeral: true });
   }
 
   // START
-  if (parts[0] === "quiz_start") {
-    sessions.set(userId, { step: 0, scores: { Grifondoro: 0, Serpeverde: 0, Corvonero: 0, Tassorosso: 0 } });
+  if (type === "quiz_start") {
+    sessions.set(userId, {
+      step: 0,
+      scores: { Grifondoro: 0, Serpeverde: 0, Corvonero: 0, Tassorosso: 0 }
+    });
 
     return interaction.reply({
       content: `${interaction.user} ${QUESTIONS[0].text}`,
@@ -183,14 +194,14 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   // ANSWER
-  if (parts[0] === "quiz_answer") {
-    const step = Number(parts[2]);
-    const idx = Number(parts[3]);
+  if (type === "quiz_answer") {
+    const step = Number(stepStr);
+    const idx = Number(idxStr);
     const session = sessions.get(userId);
     if (!session || session.step !== step) return;
 
-    const house = QUESTIONS[step].answers[idx].house;
-    session.scores[house]++;
+    const houseKey = QUESTIONS[step].answers[idx].house;
+    session.scores[houseKey]++;
 
     const next = step + 1;
 
@@ -202,19 +213,30 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // FINISH
+    // ===== FINE QUIZ =====
     sessions.delete(userId);
-    const top = Object.entries(session.scores).sort((a, b) => b[1] - a[1])[0][0];
+
+    const winner = Object.entries(session.scores)
+      .sort((a, b) => b[1] - a[1])[0][0];
 
     const member = await interaction.guild.members.fetch(userId);
-    await removeHouseRoles(member);
-    const role = await ensureRole(interaction.guild, top);
-    await member.roles.add(role);
 
-    return interaction.update({
-      content: `🎩 **${pickRandom(HAT_LINES)}**\n✨ ${member} sei… **${top.toUpperCase()}**!`,
-      components: []
-    });
+    try {
+      await removeHouseRoles(member);
+      const role = await getHouseRole(interaction.guild, winner);
+      await member.roles.add(role);
+
+      return interaction.update({
+        content: `🎩 **${pick(HAT_LINES)}**\n✨ ${member} sei… **${role.name.toUpperCase()}**!`,
+        components: []
+      });
+    } catch (e) {
+      console.error(e);
+      return interaction.update({
+        content: "❌ Errore nell'assegnazione della Casa. Contatta un prefetto.",
+        components: []
+      });
+    }
   }
 });
 
