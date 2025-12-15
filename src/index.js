@@ -222,7 +222,7 @@ client.on("messageCreate", async (message) => {
 
     const channel = await message.guild.channels.fetch(QUIZ_CHANNEL_ID);
     channel.send({
-      content: `🎩 ${target}, il Cappello Parlante ti aspetta.`,
+      content: `🎩 Il Cappello Parlante ti osserva ${target}, Mmh… testa interessante… vediamo dove metterti.`,
       components: [makeStartRow(target.id)]
     });
 
