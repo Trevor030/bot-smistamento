@@ -1,32 +1,35 @@
-const { REST, Routes } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
+require("dotenv").config();
+const { REST, Routes, SlashCommandBuilder } = require("discord.js");
 
-module.exports = async function registerCommands(APP_ID, GUILD_ID, TOKEN){
-  if (!APP_ID || !TOKEN) {
-    throw new Error('APP_ID and TOKEN required for registering commands');
+const token = process.env.DISCORD_TOKEN;
+const clientId = process.env.CLIENT_ID;
+const guildId = process.env.GUILD_ID;
+
+if (!token || !clientId || !guildId) {
+  console.error("Missing env vars: DISCORD_TOKEN, CLIENT_ID, GUILD_ID");
+  process.exit(1);
+}
+
+const commands = [
+  new SlashCommandBuilder()
+    .setName("smistamento")
+    .setDescription("Il Cappello Parlante decide la tua Casa!"),
+  new SlashCommandBuilder()
+    .setName("rismista")
+    .setDescription("Rimuove la tua Casa e ti rismista (admin/mod consigliato)."),
+].map(c => c.toJSON());
+
+const rest = new REST({ version: "10" }).setToken(token);
+
+(async () => {
+  try {
+    console.log("Registering guild slash commands...");
+    await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
+      body: commands,
+    });
+    console.log("Done.");
+  } catch (err) {
+    console.error(err);
+    process.exit(1);
   }
-  const commands = [];
-  const commandsPath = path.join(__dirname, 'commands');
-  function collect(dir){
-    for(const f of fs.readdirSync(dir)){
-      const full = path.join(dir, f);
-      if (fs.statSync(full).isDirectory()) collect(full);
-      else if (f.endsWith('.js')){
-        const cmd = require(full);
-        if (cmd.data) commands.push(cmd.data.toJSON());
-      }
-    }
-  }
-  collect(commandsPath);
-  const rest = new REST({ version: '10' }).setToken(TOKEN);
-  if (GUILD_ID) {
-    console.log('Registering guild commands...');
-    await rest.put(Routes.applicationGuildCommands(APP_ID, GUILD_ID), { body: commands });
-    console.log('Guild commands registered.');
-  } else {
-    console.log('Registering global commands (may take minutes)...');
-    await rest.put(Routes.applicationCommands(APP_ID), { body: commands });
-    console.log('Global commands registered.');
-  }
-};
+})();
