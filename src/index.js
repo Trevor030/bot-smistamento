@@ -139,7 +139,7 @@ const client = new Client({
   partials: [Partials.GuildMember]
 });
 
-client.once("ready", () => {
+client.once("clientReady", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   console.log(`➡️ Quiz channel id: ${QUIZ_CHANNEL_ID}`);
 });
