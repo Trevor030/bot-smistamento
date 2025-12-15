@@ -12,20 +12,16 @@ const {
 // ===== ENV =====
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const QUIZ_CHANNEL_ID = process.env.QUIZ_CHANNEL_ID;
+const PREFIX = "!";
 
-if (!DISCORD_TOKEN) {
-  console.error("❌ Missing env: DISCORD_TOKEN");
-  process.exit(1);
-}
-if (!QUIZ_CHANNEL_ID) {
-  console.error("❌ Missing env: QUIZ_CHANNEL_ID (the channel where quiz will run)");
+if (!DISCORD_TOKEN || !QUIZ_CHANNEL_ID) {
+  console.error("❌ Missing env vars");
   process.exit(1);
 }
 
 // ===== CONFIG =====
 const HOUSES = ["Grifondoro", "Serpeverde", "Corvonero", "Tassorosso"];
 
-// Quiz rapidissimo (3 domande)
 const QUESTIONS = [
   {
     text: "🏰 **Benvenuto a Hogwarts!** Cosa ti attira di più?",
@@ -58,23 +54,17 @@ const QUESTIONS = [
 
 const HAT_LINES = [
   "Hmm… interessante… molto interessante…",
-  "Vedo coraggio, ambizione, intelletto… e lealtà…",
-  "La scelta non è banale… ma il Cappello decide!",
-  "Ah! Qui c’è del potenziale…"
+  "Vedo qualità rare in te…",
+  "La scelta non è banale…",
+  "Il Cappello ha deciso!"
 ];
 
+// ===== STATE =====
+const sessions = new Map();
+
+// ===== HELPERS =====
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
-}
-
-// Sessioni quiz in memoria
-const sessions = new Map(); // userId -> { step, scores, createdAt }
-
-// Timeout sessione (5 minuti)
-const SESSION_TTL_MS = 5 * 60 * 1000;
-
-function newScores() {
-  return Object.fromEntries(HOUSES.map(h => [h, 0]));
 }
 
 function makeStartRow(userId) {
@@ -87,12 +77,11 @@ function makeStartRow(userId) {
 }
 
 function makeAnswersRow(userId, step) {
-  const q = QUESTIONS[step];
   const row = new ActionRowBuilder();
-  q.answers.forEach((a, idx) => {
+  QUESTIONS[step].answers.forEach((a, i) => {
     row.addComponents(
       new ButtonBuilder()
-        .setCustomId(`quiz_answer:${userId}:${step}:${idx}`)
+        .setCustomId(`quiz_answer:${userId}:${step}:${i}`)
         .setLabel(a.label)
         .setStyle(ButtonStyle.Secondary)
     );
@@ -100,199 +89,132 @@ function makeAnswersRow(userId, step) {
   return row;
 }
 
-async function ensureRole(guild, roleName) {
-  let role = guild.roles.cache.find(r => r.name === roleName);
-  if (!role) {
-    role = await guild.roles.create({
-      name: roleName,
-      reason: "Sorting Hat bot: auto-create house role"
-    });
-  }
+async function ensureRole(guild, name) {
+  let role = guild.roles.cache.find(r => r.name === name);
+  if (!role) role = await guild.roles.create({ name });
   return role;
 }
 
-async function removeOtherHouseRoles(member) {
-  const houseRoleNames = new Set(HOUSES);
-  const rolesToRemove = member.roles.cache.filter(r => houseRoleNames.has(r.name));
-  if (rolesToRemove.size > 0) {
-    await member.roles.remove([...rolesToRemove.values()]);
-  }
-}
-
-function sessionValid(s) {
-  return s && (Date.now() - s.createdAt) <= SESSION_TTL_MS;
-}
-
-async function postQuizInvite(guild, targetMember) {
-  const channel = await guild.channels.fetch(QUIZ_CHANNEL_ID).catch(() => null);
-  if (!channel) throw new Error("Quiz channel not found (check QUIZ_CHANNEL_ID).");
-
-  await channel.send({
-    content: `🎩 ${targetMember} il Cappello Parlante ti aspetta. Clicca per iniziare!`,
-    components: [makeStartRow(targetMember.id)]
-  });
+async function removeHouseRoles(member) {
+  const toRemove = member.roles.cache.filter(r => HOUSES.includes(r.name));
+  if (toRemove.size) await member.roles.remove([...toRemove.values()]);
 }
 
 // ===== CLIENT =====
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ],
   partials: [Partials.GuildMember]
 });
 
-client.once("clientReady", () => {
+client.once("ready", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  console.log(`➡️ Quiz channel id: ${QUIZ_CHANNEL_ID}`);
 });
 
-// Quando entra un utente: manda messaggio nel canale quiz
+// ===== USER JOIN =====
 client.on("guildMemberAdd", async (member) => {
-  try {
-    const channel = await member.guild.channels.fetch(QUIZ_CHANNEL_ID).catch(() => null);
-    if (!channel) return;
+  const channel = await member.guild.channels.fetch(QUIZ_CHANNEL_ID).catch(() => null);
+  if (!channel) return;
 
-    await channel.send({
-      content: `👋 Benvenuto ${member}! Pronto per lo **Smistamento**?`,
-      components: [makeStartRow(member.id)]
+  channel.send({
+    content: `👋 Benvenuto ${member}! Pronto per lo **Smistamento**?`,
+    components: [makeStartRow(member.id)]
+  });
+});
+
+// ===== COMMANDS (!) =====
+client.on("messageCreate", async (message) => {
+  if (message.author.bot) return;
+  if (!message.content.startsWith(PREFIX)) return;
+
+  const args = message.content.slice(PREFIX.length).trim().split(/\s+/);
+  const command = args.shift()?.toLowerCase();
+
+  // !resetcasa @utente
+  if (command === "resetcasa") {
+    if (
+      !message.member.permissions.has(PermissionsBitField.Flags.ManageRoles) &&
+      !message.member.permissions.has(PermissionsBitField.Flags.Administrator)
+    ) {
+      return message.reply("❌ Non hai i permessi per usare questo comando.");
+    }
+
+    const target = message.mentions.members.first();
+    if (!target) {
+      return message.reply("❗ Usa: `!resetcasa @utente`");
+    }
+
+    sessions.delete(target.id);
+    await removeHouseRoles(target);
+
+    const channel = await message.guild.channels.fetch(QUIZ_CHANNEL_ID);
+    channel.send({
+      content: `🎩 ${target}, il Cappello Parlante ti aspetta.`,
+      components: [makeStartRow(target.id)]
     });
-  } catch (err) {
-    console.error("guildMemberAdd error:", err);
+
+    message.reply(`✅ Casa rimossa per ${target.user.username}`);
   }
 });
 
+// ===== QUIZ BUTTONS =====
 client.on("interactionCreate", async (interaction) => {
-  try {
-    // ===== Slash command: /resetcasa =====
-    if (interaction.isChatInputCommand()) {
-      if (interaction.commandName !== "resetcasa") return;
+  if (!interaction.isButton()) return;
 
-      // permessi: Manage Roles o Admin
-      const ok =
-        interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageRoles) ||
-        interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
+  const parts = interaction.customId.split(":");
+  const userId = parts[1];
 
-      if (!ok) {
-        return interaction.reply({ content: "Solo mod/admin possono usare **/resetcasa**.", ephemeral: true });
-      }
+  if (interaction.user.id !== userId) {
+    return interaction.reply({ content: "Questo quiz non è per te 👀", ephemeral: true });
+  }
 
-      const user = interaction.options.getUser("utente", true);
-      const guild = interaction.guild;
-      if (!guild) return interaction.reply({ content: "Questo comando funziona solo in un server.", ephemeral: true });
+  // START
+  if (parts[0] === "quiz_start") {
+    sessions.set(userId, { step: 0, scores: { Grifondoro: 0, Serpeverde: 0, Corvonero: 0, Tassorosso: 0 } });
 
-      const targetMember = await guild.members.fetch(user.id);
+    return interaction.reply({
+      content: `${interaction.user} ${QUESTIONS[0].text}`,
+      components: [makeAnswersRow(userId, 0)]
+    });
+  }
 
-      // reset sessione quiz (se c'è)
-      sessions.delete(user.id);
+  // ANSWER
+  if (parts[0] === "quiz_answer") {
+    const step = Number(parts[2]);
+    const idx = Number(parts[3]);
+    const session = sessions.get(userId);
+    if (!session || session.step !== step) return;
 
-      // rimuovi ruoli casa
-      await removeOtherHouseRoles(targetMember);
+    const house = QUESTIONS[step].answers[idx].house;
+    session.scores[house]++;
 
-      // riposta invito quiz
-      await postQuizInvite(guild, targetMember);
+    const next = step + 1;
 
-      return interaction.reply({
-        content: `✅ Casa rimossa per ${targetMember}. Ho ripubblicato il quiz nel canale.`,
-        ephemeral: true
-      });
-    }
-
-    // ===== Bottoni quiz =====
-    if (!interaction.isButton()) return;
-
-    const id = interaction.customId;
-
-    // START
-    if (id.startsWith("quiz_start:")) {
-      const [, targetUserId] = id.split(":");
-
-      if (interaction.user.id !== targetUserId) {
-        return interaction.reply({ content: "Questo quiz non è per te 👀", ephemeral: true });
-      }
-
-      // Se già ha una casa, blocca
-      const member = interaction.member;
-      const alreadyHouse = member?.roles?.cache?.some(r => HOUSES.includes(r.name));
-      if (alreadyHouse) {
-        return interaction.reply({
-          content: "Hai già una Casa! Se vuoi cambiare, chiedi a un mod di usare **/resetcasa**.",
-          ephemeral: true
-        });
-      }
-
-      sessions.set(targetUserId, { step: 0, scores: newScores(), createdAt: Date.now() });
-
-      return interaction.reply({
-        content: `${interaction.user} ${QUESTIONS[0].text}`,
-        components: [makeAnswersRow(targetUserId, 0)]
-      });
-    }
-
-    // ANSWER
-    if (id.startsWith("quiz_answer:")) {
-      const [, targetUserId, stepStr, idxStr] = id.split(":");
-      const step = Number(stepStr);
-      const idx = Number(idxStr);
-
-      if (interaction.user.id !== targetUserId) {
-        return interaction.reply({ content: "Questo quiz non è per te 👀", ephemeral: true });
-      }
-
-      const session = sessions.get(targetUserId);
-      if (!sessionValid(session) || session.step !== step) {
-        sessions.delete(targetUserId);
-        return interaction.reply({
-          content: "Sessione scaduta o non valida. Riclicca **Inizia il quiz** nel messaggio del canale.",
-          ephemeral: true
-        });
-      }
-
-      const chosen = QUESTIONS[step].answers[idx];
-      if (!chosen) return interaction.reply({ content: "Risposta non valida.", ephemeral: true });
-
-      session.scores[chosen.house] += 1;
-
-      const nextStep = step + 1;
-
-      // prossima domanda
-      if (nextStep < QUESTIONS.length) {
-        session.step = nextStep;
-        sessions.set(targetUserId, session);
-
-        return interaction.update({
-          content: `${interaction.user} ${QUESTIONS[nextStep].text}`,
-          components: [makeAnswersRow(targetUserId, nextStep)]
-        });
-      }
-
-      // FINE QUIZ
-      sessions.delete(targetUserId);
-
-      const entries = Object.entries(session.scores);
-      const max = Math.max(...entries.map(([, v]) => v));
-      const top = entries.filter(([, v]) => v === max).map(([k]) => k);
-      const finalHouse = pickRandom(top);
-
-      const guild = interaction.guild;
-      if (!guild) return interaction.update({ content: "Errore: solo in server.", components: [] });
-
-      const member = await guild.members.fetch(targetUserId);
-
-      await removeOtherHouseRoles(member);
-
-      const role = await ensureRole(guild, finalHouse);
-      await member.roles.add(role);
-
-      const hatLine = pickRandom(HAT_LINES);
-
+    if (next < QUESTIONS.length) {
+      session.step = next;
       return interaction.update({
-        content: `🎩 **Cappello Parlante:** "${hatLine}"\n✨ ${member} sei… **${finalHouse.toUpperCase()}**!`,
-        components: []
+        content: `${interaction.user} ${QUESTIONS[next].text}`,
+        components: [makeAnswersRow(userId, next)]
       });
     }
-  } catch (err) {
-    console.error("interactionCreate error:", err);
-    if (interaction.isRepliable()) {
-      await interaction.reply({ content: "Errore interno del bot. Controlla i log.", ephemeral: true }).catch(() => {});
-    }
+
+    // FINISH
+    sessions.delete(userId);
+    const top = Object.entries(session.scores).sort((a, b) => b[1] - a[1])[0][0];
+
+    const member = await interaction.guild.members.fetch(userId);
+    await removeHouseRoles(member);
+    const role = await ensureRole(interaction.guild, top);
+    await member.roles.add(role);
+
+    return interaction.update({
+      content: `🎩 **${pickRandom(HAT_LINES)}**\n✨ ${member} sei… **${top.toUpperCase()}**!`,
+      components: []
+    });
   }
 });
 
