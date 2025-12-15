@@ -1,12 +1,11 @@
 {
   "name": "discord-sorting-hat-quiz-bot",
-  "version": "1.1.0",
-  "description": "Discord bot: quiz rapido stile Hogwarts + smistamento in ruoli + comando /resetcasa",
+  "version": "2.0.0",
+  "description": "Discord bot: quiz Hogwarts + comandi !",
   "main": "src/index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node src/index.js",
-    "register": "node src/register-commands.js"
+    "start": "node src/index.js"
   },
   "dependencies": {
     "discord.js": "^14.16.3",
