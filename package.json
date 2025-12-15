@@ -1,15 +1,14 @@
 {
-  "name": "discord-bot",
+  "name": "sorting-hat-bot",
   "version": "1.0.0",
-  "description": "Games + safe moderation bot (slash commands)",
   "main": "src/index.js",
   "type": "commonjs",
   "scripts": {
     "start": "node src/index.js",
-    "register-commands": "node src/registerCommands.js"
+    "register": "node src/register-commands.js"
   },
   "dependencies": {
     "discord.js": "^14.16.3",
-    "dotenv": "^16.0.3"
+    "dotenv": "^16.4.5"
   }
 }
