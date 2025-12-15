@@ -3,32 +3,100 @@ const {
   Client,
   GatewayIntentBits,
   Partials,
-  PermissionsBitField
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle
 } = require("discord.js");
 
-const token = process.env.DISCORD_TOKEN;
-if (!token) {
-  console.error("Missing DISCORD_TOKEN");
+// ===== ENV =====
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const QUIZ_CHANNEL_ID = process.env.QUIZ_CHANNEL_ID;
+
+if (!DISCORD_TOKEN) {
+  console.error("❌ Missing env: DISCORD_TOKEN");
+  process.exit(1);
+}
+if (!QUIZ_CHANNEL_ID) {
+  console.error("❌ Missing env: QUIZ_CHANNEL_ID (the channel where quiz will run)");
   process.exit(1);
 }
 
-const HOUSES = [
-  { name: "Grifondoro", role: "Grifondoro" },
-  { name: "Serpeverde", role: "Serpeverde" },
-  { name: "Corvonero", role: "Corvonero" },
-  { name: "Tassorosso", role: "Tassorosso" }
+// ===== CONFIG =====
+const HOUSES = ["Grifondoro", "Serpeverde", "Corvonero", "Tassorosso"];
+
+// Quiz rapidissimo (3 domande)
+const QUESTIONS = [
+  {
+    text: "🏰 **Benvenuto a Hogwarts!** Cosa ti attira di più?",
+    answers: [
+      { label: "Mettermi alla prova", house: "Grifondoro" },
+      { label: "Arrivare in alto", house: "Serpeverde" },
+      { label: "Capire e scoprire", house: "Corvonero" },
+      { label: "Stare con i miei", house: "Tassorosso" }
+    ]
+  },
+  {
+    text: "📚 Un compagno bara a un esame. Tu…",
+    answers: [
+      { label: "Lo affronti subito", house: "Grifondoro" },
+      { label: "Lo usi a tuo vantaggio", house: "Serpeverde" },
+      { label: "Valuti e poi decidi", house: "Corvonero" },
+      { label: "Cerchi una via gentile", house: "Tassorosso" }
+    ]
+  },
+  {
+    text: "✨ Scegli un oggetto magico.",
+    answers: [
+      { label: "Spada antica", house: "Grifondoro" },
+      { label: "Anello di potere", house: "Serpeverde" },
+      { label: "Grimorio rarissimo", house: "Corvonero" },
+      { label: "Oggetto che aiuta tutti", house: "Tassorosso" }
+    ]
+  }
 ];
 
 const HAT_LINES = [
   "Hmm… interessante… molto interessante…",
-  "Ah! Qui c'è del potenziale…",
-  "Difficile… davvero difficile…",
   "Vedo coraggio, ambizione, intelletto… e lealtà…",
-  "La scelta non è banale… ma il Cappello decide!"
+  "La scelta non è banale… ma il Cappello decide!",
+  "Ah! Qui c’è del potenziale…"
 ];
 
 function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
+}
+
+// Sessioni quiz in memoria (semplice)
+const sessions = new Map(); // userId -> { step, scores, createdAt }
+
+// Timeout sessione (5 minuti)
+const SESSION_TTL_MS = 5 * 60 * 1000;
+
+function newScores() {
+  return Object.fromEntries(HOUSES.map(h => [h, 0]));
+}
+
+function makeStartRow(userId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`quiz_start:${userId}`)
+      .setLabel("🎩 Inizia il quiz")
+      .setStyle(ButtonStyle.Primary)
+  );
+}
+
+function makeAnswersRow(userId, step) {
+  const q = QUESTIONS[step];
+  const row = new ActionRowBuilder();
+  q.answers.forEach((a, idx) => {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`quiz_answer:${userId}:${step}:${idx}`)
+        .setLabel(a.label)
+        .setStyle(ButtonStyle.Secondary)
+    );
+  });
+  return row;
 }
 
 async function ensureRole(guild, roleName) {
@@ -43,81 +111,155 @@ async function ensureRole(guild, roleName) {
 }
 
 async function removeOtherHouseRoles(member) {
-  const houseRoleNames = new Set(HOUSES.map(h => h.role));
+  const houseRoleNames = new Set(HOUSES);
   const rolesToRemove = member.roles.cache.filter(r => houseRoleNames.has(r.name));
   if (rolesToRemove.size > 0) {
     await member.roles.remove([...rolesToRemove.values()]);
   }
 }
 
+function sessionValid(s) {
+  return s && (Date.now() - s.createdAt) <= SESSION_TTL_MS;
+}
+
+// ===== CLIENT =====
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers
+  ],
   partials: [Partials.GuildMember]
 });
 
-client.once("ready", async () => {
+client.once("ready", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+  console.log(`➡️ Quiz channel id: ${QUIZ_CHANNEL_ID}`);
 });
 
+// 1) Quando entra un utente: manda messaggio nel canale quiz
+client.on("guildMemberAdd", async (member) => {
+  try {
+    const channel = await member.guild.channels.fetch(QUIZ_CHANNEL_ID).catch(() => null);
+    if (!channel) return;
+
+    await channel.send({
+      content: `👋 Benvenuto ${member}! Pronto per lo **Smistamento**?`,
+      components: [makeStartRow(member.id)]
+    });
+  } catch (err) {
+    console.error("guildMemberAdd error:", err);
+  }
+});
+
+// 2) Bottoni quiz
 client.on("interactionCreate", async (interaction) => {
   try {
-    if (!interaction.isChatInputCommand()) return;
+    if (!interaction.isButton()) return;
 
-    const cmd = interaction.commandName;
+    const id = interaction.customId;
 
-    if (cmd !== "smistamento" && cmd !== "rismista") return;
+    // START
+    if (id.startsWith("quiz_start:")) {
+      const [, targetUserId] = id.split(":");
 
-    await interaction.deferReply({ ephemeral: false });
-
-    const guild = interaction.guild;
-    const member = interaction.member; // GuildMember
-
-    if (!guild || !member) {
-      return interaction.editReply("Errore: questo comando funziona solo in un server.");
-    }
-
-    // Per /rismista puoi limitare ai mod/admin (consigliato)
-    if (cmd === "rismista") {
-      const hasPerm =
-        interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageRoles) ||
-        interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
-
-      if (!hasPerm) {
-        return interaction.editReply("Solo mod/admin possono usare **/rismista**.");
+      if (interaction.user.id !== targetUserId) {
+        return interaction.reply({ content: "Questo quiz non è per te 👀", ephemeral: true });
       }
-    }
 
-    // Se non vuoi rismistare, blocca chi ha già un ruolo casa:
-    if (cmd === "smistamento") {
-      const already = member.roles.cache.some(r => HOUSES.some(h => h.role === r.name));
-      if (already) {
-        return interaction.editReply("Hai già una Casa! Se vuoi cambiare, chiedi a un mod di usare **/rismista**.");
+      // Se già ha una casa, blocca (evita resmisti)
+      const member = interaction.member;
+      const alreadyHouse = member?.roles?.cache?.some(r => HOUSES.includes(r.name));
+      if (alreadyHouse) {
+        return interaction.reply({
+          content: "Hai già una Casa! Se vuoi cambiare, chiedi a un mod di rimuovere il ruolo casa.",
+          ephemeral: true
+        });
       }
+
+      sessions.set(targetUserId, { step: 0, scores: newScores(), createdAt: Date.now() });
+
+      return interaction.reply({
+        content: `${interaction.user} ${QUESTIONS[0].text}`,
+        components: [makeAnswersRow(targetUserId, 0)]
+      });
     }
 
-    // Rimuove eventuali ruoli casa (così /rismista funziona)
-    await removeOtherHouseRoles(member);
+    // ANSWER
+    if (id.startsWith("quiz_answer:")) {
+      const [, targetUserId, stepStr, idxStr] = id.split(":");
+      const step = Number(stepStr);
+      const idx = Number(idxStr);
 
-    // Scegli casa
-    const chosen = pickRandom(HOUSES);
-    const role = await ensureRole(guild, chosen.role);
+      if (interaction.user.id !== targetUserId) {
+        return interaction.reply({ content: "Questo quiz non è per te 👀", ephemeral: true });
+      }
 
-    // Assicurati che il bot possa assegnare il ruolo:
-    // IMPORTANTISSIMO: il ruolo del bot deve stare sopra i ruoli Casa nella gerarchia.
-    await member.roles.add(role);
+      const session = sessions.get(targetUserId);
+      if (!sessionValid(session) || session.step !== step) {
+        sessions.delete(targetUserId);
+        return interaction.reply({
+          content: "Sessione scaduta o non valida. Riclicca **Inizia il quiz** nel messaggio di benvenuto.",
+          ephemeral: true
+        });
+      }
 
-    const line = pickRandom(HAT_LINES);
-    await interaction.editReply(
-      `🎩 **Cappello Parlante:** "${line}"\n` +
-      `✨ **${member.user.username}**, la tua Casa è… **${chosen.name.toUpperCase()}**!`
-    );
+      const chosen = QUESTIONS[step].answers[idx];
+      if (!chosen) {
+        return interaction.reply({ content: "Risposta non valida.", ephemeral: true });
+      }
 
+      session.scores[chosen.house] += 1;
+
+      const nextStep = step + 1;
+
+      // prossima domanda
+      if (nextStep < QUESTIONS.length) {
+        session.step = nextStep;
+        sessions.set(targetUserId, session);
+
+        return interaction.update({
+          content: `${interaction.user} ${QUESTIONS[nextStep].text}`,
+          components: [makeAnswersRow(targetUserId, nextStep)]
+        });
+      }
+
+      // FINE QUIZ
+      sessions.delete(targetUserId);
+
+      const entries = Object.entries(session.scores);
+      const max = Math.max(...entries.map(([, v]) => v));
+      const top = entries.filter(([, v]) => v === max).map(([k]) => k);
+      const finalHouse = pickRandom(top);
+
+      const guild = interaction.guild;
+      if (!guild) {
+        return interaction.update({ content: "Errore: questo comando funziona solo in server.", components: [] });
+      }
+
+      const member = await guild.members.fetch(targetUserId);
+
+      // Rimuovi altre case (sicurezza)
+      await removeOtherHouseRoles(member);
+
+      // Crea ruolo se manca + assegna
+      const role = await ensureRole(guild, finalHouse);
+      await member.roles.add(role);
+
+      const hatLine = pickRandom(HAT_LINES);
+
+      return interaction.update({
+        content:
+          `🎩 **Cappello Parlante:** "${hatLine}"\n` +
+          `✨ ${member} sei… **${finalHouse.toUpperCase()}**!`,
+        components: []
+      });
+    }
   } catch (err) {
-    console.error(err);
-    if (interaction.deferred || interaction.replied) {
-      interaction.editReply("Errore interno del bot. Controlla i log.");
+    console.error("interactionCreate error:", err);
+    if (interaction.isRepliable()) {
+      await interaction.reply({ content: "Errore interno del bot. Controlla i log.", ephemeral: true }).catch(() => {});
     }
   }
 });
 
-client.login(token);
+client.login(DISCORD_TOKEN);
