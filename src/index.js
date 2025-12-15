@@ -14,6 +14,11 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const QUIZ_CHANNEL_ID = process.env.QUIZ_CHANNEL_ID;
 const PREFIX = "!";
 
+// Cleanup config
+const CLEANUP_CHANNEL_ID = process.env.CLEANUP_CHANNEL_ID || QUIZ_CHANNEL_ID;
+const CLEANUP_EVERY_MINUTES = Number(process.env.CLEANUP_EVERY_MINUTES || 30);
+const DELETE_AFTER_MS = 24 * 60 * 60 * 1000; // 24h
+
 if (!DISCORD_TOKEN || !QUIZ_CHANNEL_ID) {
   console.error("❌ Missing env vars");
   process.exit(1);
@@ -113,6 +118,54 @@ async function removeHouseRoles(member) {
   }
 }
 
+// ===== CLEANUP (24h) =====
+async function cleanupChannel(guild) {
+  const channel = await guild.channels.fetch(CLEANUP_CHANNEL_ID).catch(() => null);
+  if (!channel || !channel.isTextBased()) return;
+
+  const cutoff = Date.now() - DELETE_AFTER_MS;
+  const now = Date.now();
+
+  let lastId = null;
+  let deletedCount = 0;
+
+  while (true) {
+    const batch = await channel.messages.fetch({
+      limit: 100,
+      ...(lastId ? { before: lastId } : {})
+    });
+
+    if (batch.size === 0) break;
+
+    // messaggi più vecchi di 24h
+    const old = batch.filter(m => m.createdTimestamp < cutoff);
+
+    if (old.size > 0) {
+      // Bulk delete solo per messaggi < 14 giorni (limite API)
+      const canBulk = old.filter(m => (now - m.createdTimestamp) < 14 * 24 * 60 * 60 * 1000);
+
+      if (canBulk.size > 0) {
+        const res = await channel.bulkDelete(canBulk, true).catch(() => null);
+        if (res) deletedCount += res.size ?? 0;
+      }
+
+      // (di solito non serve, ma se mai superi i 14 giorni)
+      const leftovers = old.filter(m => (now - m.createdTimestamp) >= 14 * 24 * 60 * 60 * 1000);
+      for (const msg of leftovers.values()) {
+        await msg.delete().catch(() => {});
+        deletedCount += 1;
+      }
+    }
+
+    lastId = batch.last()?.id;
+    if (!lastId) break;
+  }
+
+  if (deletedCount > 0) {
+    console.log(`🧹 Cleanup: deleted ${deletedCount} messages in channel ${channel.id}`);
+  }
+}
+
 // ===== CLIENT =====
 const client = new Client({
   intents: [
@@ -124,8 +177,14 @@ const client = new Client({
   partials: [Partials.GuildMember]
 });
 
-client.once("ready", () => {
+client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+
+  // Avvio subito + ripeti ogni X minuti
+  for (const guild of client.guilds.cache.values()) {
+    cleanupChannel(guild).catch(console.error);
+    setInterval(() => cleanupChannel(guild).catch(console.error), CLEANUP_EVERY_MINUTES * 60 * 1000);
+  }
 });
 
 // ===== USER JOIN =====
