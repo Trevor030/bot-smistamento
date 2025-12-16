@@ -17,7 +17,12 @@ const PREFIX = "!";
 // Cleanup config
 const CLEANUP_CHANNEL_ID = process.env.CLEANUP_CHANNEL_ID || QUIZ_CHANNEL_ID;
 const CLEANUP_EVERY_MINUTES = Number(process.env.CLEANUP_EVERY_MINUTES || 30);
-const DELETE_AFTER_MS = 24 * 60 * 60 * 1000; // 24h
+
+// ✅ 6h invece di 24h
+const DELETE_AFTER_MS = 6 * 60 * 60 * 1000; // 6h
+
+// ✅ session timeout (anti sessioni “a metà”)
+const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 10 * 60 * 1000); // 10 min default
 
 if (!DISCORD_TOKEN || !QUIZ_CHANNEL_ID) {
   console.error("❌ Missing env vars");
@@ -33,33 +38,51 @@ const HOUSES = {
 };
 const HOUSE_KEYS = Object.keys(HOUSES);
 
-// ===== QUIZ =====
+// ===== QUIZ (5 domande, più realistiche) =====
 const QUESTIONS = [
   {
-    text: "🏰 **Benvenuto a Hogwarts!** Cosa ti attira di più?",
+    text: "🏰 **Arrivi a Hogwarts.** Nei primi giorni, cosa fai più spesso?",
     answers: [
-      { label: "Mettermi alla prova", house: "Grifondoro" },
-      { label: "Arrivare in alto", house: "Serpeverde" },
-      { label: "Capire e scoprire", house: "Corvonero" },
-      { label: "Stare con i miei", house: "Tassorosso" }
+      { label: "Esploro il castello anche dove non dovrei", house: "Grifondoro" },
+      { label: "Capisco subito chi conta e con chi conviene legare", house: "Serpeverde" },
+      { label: "Mi informo: regole, mappe, biblioteca e curiosità", house: "Corvonero" },
+      { label: "Cerco il mio gruppo e aiuto a sistemarsi chi è in difficoltà", house: "Tassorosso" }
     ]
   },
   {
-    text: "📚 Un compagno bara a un esame. Tu…",
+    text: "📚 Durante una lezione pratica, un incantesimo ti riesce male davanti a tutti. Tu…",
     answers: [
-      { label: "Lo affronti subito", house: "Grifondoro" },
-      { label: "Lo usi a tuo vantaggio", house: "Serpeverde" },
-      { label: "Valuti e poi decidi", house: "Corvonero" },
-      { label: "Cerchi una via gentile", house: "Tassorosso" }
+      { label: "Riprovo subito, anche se rischio di sbagliare ancora", house: "Grifondoro" },
+      { label: "Mantengo la faccia: trasformo l’errore in una mossa intelligente", house: "Serpeverde" },
+      { label: "Chiedo cosa non torna e analizzo la formula con calma", house: "Corvonero" },
+      { label: "Sorrido, mi scuso e poi mi esercito con pazienza dopo lezione", house: "Tassorosso" }
     ]
   },
   {
-    text: "✨ Scegli un oggetto magico.",
+    text: "🧪 In Pozioni, vi danno un compito a coppie. Il tuo partner è inesperto. Cosa fai?",
     answers: [
-      { label: "Spada antica", house: "Grifondoro" },
-      { label: "Anello di potere", house: "Serpeverde" },
-      { label: "Grimorio rarissimo", house: "Corvonero" },
-      { label: "Oggetto che aiuta tutti", house: "Tassorosso" }
+      { label: "Prendo in mano la situazione per non far saltare il banco", house: "Grifondoro" },
+      { label: "Lo guido, ma in modo che il merito ricada anche su di me", house: "Serpeverde" },
+      { label: "Spiego il perché dei passaggi: così impariamo entrambi", house: "Corvonero" },
+      { label: "Lo incoraggio e gli faccio fare i passaggi più semplici finché prende fiducia", house: "Tassorosso" }
+    ]
+  },
+  {
+    text: "🌙 Notte. Senti un rumore strano in corridoio: potrebbe essere qualcuno nei guai.",
+    answers: [
+      { label: "Esco a controllare subito, anche se rischio una punizione", house: "Grifondoro" },
+      { label: "Valuto se mi conviene: prima capisco cosa sta succedendo", house: "Serpeverde" },
+      { label: "Ragiono: trappole, pericoli, indizi… poi mi muovo con un piano", house: "Corvonero" },
+      { label: "Avviso un prefetto o un professore, ma resto vicino per sicurezza", house: "Tassorosso" }
+    ]
+  },
+  {
+    text: "🏆 A fine anno, c’è una possibilità concreta di far guadagnare punti alla tua Casa. Come ti comporti?",
+    answers: [
+      { label: "Mi butto: l’occasione è adesso", house: "Grifondoro" },
+      { label: "Punto alla strategia migliore per massimizzare il risultato", house: "Serpeverde" },
+      { label: "Mi preparo: studio e faccio le cose nel modo più corretto possibile", house: "Corvonero" },
+      { label: "Coinvolgo gli altri: se vinciamo, vinciamo insieme", house: "Tassorosso" }
     ]
   }
 ];
@@ -92,12 +115,13 @@ const sessions = new Map();
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function makeStartRow(userId) {
+function makeStartRow(userId, disabled = false) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`quiz_start:${userId}`)
       .setLabel("🎩 Inizia il quiz")
       .setStyle(ButtonStyle.Primary)
+      .setDisabled(disabled)
   );
 }
 
@@ -116,15 +140,17 @@ function makeAnswersRow(userId, step) {
 
 async function getHouseRole(guild, houseKey) {
   const roleName = HOUSES[houseKey];
-  const role = guild.roles.cache.find(r => r.name === roleName);
-  if (!role) {
-    throw new Error(`Ruolo non trovato: ${roleName}`);
-  }
+
+  // ✅ robusto: assicura cache aggiornata
+  await guild.roles.fetch().catch(() => null);
+
+  const role = guild.roles.cache.find((r) => r.name === roleName);
+  if (!role) throw new Error(`Ruolo non trovato: ${roleName}`);
   return role;
 }
 
 async function removeHouseRoles(member) {
-  const toRemove = member.roles.cache.filter(r =>
+  const toRemove = member.roles.cache.filter((r) =>
     Object.values(HOUSES).includes(r.name)
   );
   if (toRemove.size) {
@@ -132,29 +158,33 @@ async function removeHouseRoles(member) {
   }
 }
 
+function endSession(userId) {
+  const s = sessions.get(userId);
+  if (s?.timeout) clearTimeout(s.timeout);
+  sessions.delete(userId);
+}
+
 /**
  * Opzione C: probabilità dinamiche
- * - converte scores in probabilità (softmax)
- * - aggiunge un po' di "rumore" per evitare risultati troppo deterministici
- * - estrae la casa in base alle probabilità
+ * - softmax su scores
+ * - rumore leggero per evitare risultati troppo deterministici
  */
 function softmaxProbs(scores) {
-  const vals = HOUSE_KEYS.map(k => scores[k] ?? 0);
+  const vals = HOUSE_KEYS.map((k) => scores[k] ?? 0);
 
   // temperatura: più alta = più random, più bassa = più deterministico
   const T = 1.15;
 
-  // shift per stabilità numerica
   const maxV = Math.max(...vals);
-  const exps = vals.map(v => Math.exp((v - maxV) / T));
+  const exps = vals.map((v) => Math.exp((v - maxV) / T));
   const sum = exps.reduce((a, b) => a + b, 0) || 1;
 
-  let probs = exps.map(e => e / sum);
+  let probs = exps.map((e) => e / sum);
 
   // rumore leggero (±3%) e rinormalizza
-  probs = probs.map(p => Math.max(0.0001, p + (Math.random() * 0.06 - 0.03)));
+  probs = probs.map((p) => Math.max(0.0001, p + (Math.random() * 0.06 - 0.03)));
   const s2 = probs.reduce((a, b) => a + b, 0) || 1;
-  probs = probs.map(p => p / s2);
+  probs = probs.map((p) => p / s2);
 
   const out = {};
   HOUSE_KEYS.forEach((k, i) => (out[k] = probs[i]));
@@ -172,16 +202,21 @@ function weightedPick(probMap) {
 }
 
 function formatProbs(probMap) {
-  // piccola "lettura del cappello" (non troppo tecnica)
   const sorted = Object.entries(probMap).sort((a, b) => b[1] - a[1]);
   const top = sorted[0];
   const second = sorted[1];
+
   const nameTop = HOUSES[top[0]];
   const nameSecond = HOUSES[second[0]];
-  return `🎩 *Sento una forte inclinazione verso* **${nameTop}**… *ma anche* **${nameSecond}** *mi chiama…*`;
+
+  // ✅ più “magico”: cita la seconda casa solo se è davvero vicina
+  if (top[1] - second[1] < 0.12) {
+    return `🎩 *Sento una forte inclinazione verso* **${nameTop}**… *ma anche* **${nameSecond}** *mi chiama…*`;
+  }
+  return `🎩 *Vedo una strada piuttosto chiara davanti a te…* **${nameTop}**…`;
 }
 
-// ===== CLEANUP (24h) =====
+// ===== CLEANUP (6h) =====
 async function cleanupChannel(guild) {
   const channel = await guild.channels.fetch(CLEANUP_CHANNEL_ID).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
@@ -200,17 +235,22 @@ async function cleanupChannel(guild) {
 
     if (batch.size === 0) break;
 
-    const old = batch.filter(m => m.createdTimestamp < cutoff);
+    const oldestInBatch = batch.last();
+    const old = batch.filter((m) => m.createdTimestamp < cutoff);
 
     if (old.size > 0) {
-      const canBulk = old.filter(m => (now - m.createdTimestamp) < 14 * 24 * 60 * 60 * 1000);
+      const canBulk = old.filter(
+        (m) => now - m.createdTimestamp < 14 * 24 * 60 * 60 * 1000
+      );
 
       if (canBulk.size > 0) {
         const res = await channel.bulkDelete(canBulk, true).catch(() => null);
         if (res) deletedCount += res.size ?? 0;
       }
 
-      const leftovers = old.filter(m => (now - m.createdTimestamp) >= 14 * 24 * 60 * 60 * 1000);
+      const leftovers = old.filter(
+        (m) => now - m.createdTimestamp >= 14 * 24 * 60 * 60 * 1000
+      );
       for (const msg of leftovers.values()) {
         await msg.delete().catch(() => {});
         deletedCount += 1;
@@ -218,6 +258,10 @@ async function cleanupChannel(guild) {
     }
 
     lastId = batch.last()?.id;
+
+    // ✅ ottimizzazione: se il più vecchio del batch è comunque “recente”, stop
+    if (oldestInBatch && oldestInBatch.createdTimestamp >= cutoff) break;
+
     if (!lastId) break;
   }
 
@@ -242,7 +286,10 @@ client.once("ready", async () => {
 
   for (const guild of client.guilds.cache.values()) {
     cleanupChannel(guild).catch(console.error);
-    setInterval(() => cleanupChannel(guild).catch(console.error), CLEANUP_EVERY_MINUTES * 60 * 1000);
+    setInterval(
+      () => cleanupChannel(guild).catch(console.error),
+      CLEANUP_EVERY_MINUTES * 60 * 1000
+    );
   }
 });
 
@@ -276,7 +323,7 @@ client.on("messageCreate", async (message) => {
     const target = message.mentions.members.first();
     if (!target) return message.reply("Usa: `!resetcasa @utente`");
 
-    sessions.delete(target.id);
+    endSession(target.id);
     await removeHouseRoles(target);
 
     const channel = await message.guild.channels.fetch(QUIZ_CHANNEL_ID);
@@ -300,13 +347,24 @@ client.on("interactionCreate", async (interaction) => {
 
   // START
   if (type === "quiz_start") {
-    sessions.set(userId, {
-      step: 0,
-      // score base: +1 per risposta, come prima
-      scores: { Grifondoro: 0, Serpeverde: 0, Corvonero: 0, Tassorosso: 0 }
-    });
+    // se esiste già una sessione, evita re-start strani
+    if (sessions.has(userId)) {
+      return interaction.reply({ content: "🎩 Hai già iniziato il quiz!", ephemeral: true });
+    }
 
-    return interaction.reply({
+    const session = {
+      step: 0,
+      scores: { Grifondoro: 0, Serpeverde: 0, Corvonero: 0, Tassorosso: 0 },
+      createdAt: Date.now(),
+      timeout: null
+    };
+
+    // ✅ session TTL: se l’utente molla, puliamo
+    session.timeout = setTimeout(() => endSession(userId), SESSION_TTL_MS);
+    sessions.set(userId, session);
+
+    // ✅ niente spam: aggiorna il messaggio con il bottone (non reply)
+    return interaction.update({
       content: `${interaction.user} ${QUESTIONS[0].text}`,
       components: [makeAnswersRow(userId, 0)]
     });
@@ -317,7 +375,15 @@ client.on("interactionCreate", async (interaction) => {
     const step = Number(stepStr);
     const idx = Number(idxStr);
     const session = sessions.get(userId);
-    if (!session || session.step !== step) return;
+
+    if (!session) {
+      return interaction.reply({ content: "⏳ Sessione scaduta. Premi **Inizia il quiz** di nuovo.", ephemeral: true });
+    }
+
+    // ✅ se qualcuno clicka roba “vecchia”, ignoriamo pulito
+    if (session.step !== step) {
+      return interaction.reply({ content: "⚠️ Questa domanda non è più valida. Continua dal quiz attuale.", ephemeral: true });
+    }
 
     const houseKey = QUESTIONS[step].answers[idx].house;
     session.scores[houseKey]++;
@@ -332,19 +398,18 @@ client.on("interactionCreate", async (interaction) => {
       });
     }
 
-    // ===== FINE QUIZ (Opzione C) =====
-    sessions.delete(userId);
-
+    // ===== FINE QUIZ =====
     const member = await interaction.guild.members.fetch(userId);
 
     try {
-      // calcolo probabilità
       const probs = softmaxProbs(session.scores);
       const winner = weightedPick(probs);
 
       const role = await getHouseRole(interaction.guild, winner);
 
-      // Suspense: prima update “penso…”, poi un fakeout, poi reveal
+      // pulisci sessione solo ora (dopo aver calcolato tutto)
+      endSession(userId);
+
       await interaction.update({
         content: `🎩 **${pick(HAT_LINES)}**\n${pick(HAT_SUSPENSE)}\n${formatProbs(probs)}`,
         components: []
@@ -365,9 +430,9 @@ client.on("interactionCreate", async (interaction) => {
       await interaction.editReply({
         content: `🎩 **Il Cappello Parlante:** "HO DECISO!"\n✨ ${member} sei… **${role.name.toUpperCase()}**!`
       });
-
     } catch (e) {
       console.error(e);
+      endSession(userId);
       return interaction.update({
         content: "❌ Errore nell'assegnazione della Casa. Contatta un prefetto.",
         components: []
