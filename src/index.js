@@ -17,12 +17,14 @@ const PREFIX = "!";
 // Cleanup config
 const CLEANUP_CHANNEL_ID = process.env.CLEANUP_CHANNEL_ID || QUIZ_CHANNEL_ID;
 const CLEANUP_EVERY_MINUTES = Number(process.env.CLEANUP_EVERY_MINUTES || 30);
+const DELETE_AFTER_MS = 6 * 60 * 60 * 1000; // ✅ 6h
 
-// ✅ 6h invece di 24h
-const DELETE_AFTER_MS = 6 * 60 * 60 * 1000; // 6h
+// Session timeout
+const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 10 * 60 * 1000); // 10 min
 
-// ✅ session timeout (anti sessioni “a metà”)
-const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 10 * 60 * 1000); // 10 min default
+// ✅ Ruoli “default”
+const MUGGLE_ROLE_NAME = process.env.MUGGLE_ROLE_NAME || "🪄 Babbani";
+const BOT_ROLE_NAME = process.env.BOT_ROLE_NAME || "👻 Spiriti del castello";
 
 if (!DISCORD_TOKEN || !QUIZ_CHANNEL_ID) {
   console.error("❌ Missing env vars");
@@ -37,52 +39,53 @@ const HOUSES = {
   Tassorosso: "💛🦡 Tassorosso"
 };
 const HOUSE_KEYS = Object.keys(HOUSES);
+const HOUSE_ROLE_NAMES = new Set(Object.values(HOUSES));
 
-// ===== QUIZ (5 domande, più realistiche) =====
+// ===== QUIZ (5 domande realistiche) =====
 const QUESTIONS = [
   {
     text: "🏰 **Arrivi a Hogwarts.** Nei primi giorni, cosa fai più spesso?",
     answers: [
       { label: "Esploro il castello anche dove non dovrei", house: "Grifondoro" },
-      { label: "Capisco subito chi conta e con chi conviene legare", house: "Serpeverde" },
-      { label: "Mi informo: regole, mappe, biblioteca e curiosità", house: "Corvonero" },
-      { label: "Cerco il mio gruppo e aiuto a sistemarsi chi è in difficoltà", house: "Tassorosso" }
+      { label: "Capisco chi conta e con chi conviene legare", house: "Serpeverde" },
+      { label: "Biblioteca, regole, mappe e curiosità", house: "Corvonero" },
+      { label: "Trovo il mio gruppo e aiuto chi è in difficoltà", house: "Tassorosso" }
     ]
   },
   {
-    text: "📚 Durante una lezione pratica, un incantesimo ti riesce male davanti a tutti. Tu…",
+    text: "📚 In una lezione pratica, un incantesimo ti riesce male davanti a tutti. Tu…",
     answers: [
-      { label: "Riprovo subito, anche se rischio di sbagliare ancora", house: "Grifondoro" },
-      { label: "Mantengo la faccia: trasformo l’errore in una mossa intelligente", house: "Serpeverde" },
-      { label: "Chiedo cosa non torna e analizzo la formula con calma", house: "Corvonero" },
-      { label: "Sorrido, mi scuso e poi mi esercito con pazienza dopo lezione", house: "Tassorosso" }
+      { label: "Riprovo subito, anche rischiando", house: "Grifondoro" },
+      { label: "Rendo l’errore una mossa “furba”", house: "Serpeverde" },
+      { label: "Analizzo cosa non torna e ritento", house: "Corvonero" },
+      { label: "Mi esercito con calma dopo lezione", house: "Tassorosso" }
     ]
   },
   {
-    text: "🧪 In Pozioni, vi danno un compito a coppie. Il tuo partner è inesperto. Cosa fai?",
+    text: "🧪 In Pozioni, lavorate a coppie. Il partner è inesperto. Cosa fai?",
     answers: [
-      { label: "Prendo in mano la situazione per non far saltare il banco", house: "Grifondoro" },
-      { label: "Lo guido, ma in modo che il merito ricada anche su di me", house: "Serpeverde" },
-      { label: "Spiego il perché dei passaggi: così impariamo entrambi", house: "Corvonero" },
-      { label: "Lo incoraggio e gli faccio fare i passaggi più semplici finché prende fiducia", house: "Tassorosso" }
+      { label: "Prendo in mano per evitare disastri", house: "Grifondoro" },
+      { label: "Lo guido, ma senza perdere vantaggio", house: "Serpeverde" },
+      { label: "Spiego il perché dei passaggi", house: "Corvonero" },
+      { label: "Lo incoraggio e lo faccio crescere", house: "Tassorosso" }
     ]
   },
   {
-    text: "🌙 Notte. Senti un rumore strano in corridoio: potrebbe essere qualcuno nei guai.",
+    text: "🌙 Notte. Senti un rumore strano in corridoio: forse qualcuno è nei guai.",
     answers: [
-      { label: "Esco a controllare subito, anche se rischio una punizione", house: "Grifondoro" },
-      { label: "Valuto se mi conviene: prima capisco cosa sta succedendo", house: "Serpeverde" },
-      { label: "Ragiono: trappole, pericoli, indizi… poi mi muovo con un piano", house: "Corvonero" },
-      { label: "Avviso un prefetto o un professore, ma resto vicino per sicurezza", house: "Tassorosso" }
+      { label: "Esco a controllare subito", house: "Grifondoro" },
+      { label: "Prima capisco se mi conviene intervenire", house: "Serpeverde" },
+      { label: "Mi muovo con un piano e attenzione", house: "Corvonero" },
+      { label: "Avviso un prefetto/prof e resto vicino", house: "Tassorosso" }
     ]
   },
   {
-    text: "🏆 A fine anno, c’è una possibilità concreta di far guadagnare punti alla tua Casa. Come ti comporti?",
+    text: "🏆 Puoi far guadagnare punti alla tua Casa con un’azione concreta. Come agisci?",
     answers: [
       { label: "Mi butto: l’occasione è adesso", house: "Grifondoro" },
-      { label: "Punto alla strategia migliore per massimizzare il risultato", house: "Serpeverde" },
-      { label: "Mi preparo: studio e faccio le cose nel modo più corretto possibile", house: "Corvonero" },
-      { label: "Coinvolgo gli altri: se vinciamo, vinciamo insieme", house: "Tassorosso" }
+      { label: "Scelgo la strategia più efficace", house: "Serpeverde" },
+      { label: "Mi preparo e faccio tutto “pulito”", house: "Corvonero" },
+      { label: "Coinvolgo gli altri: si vince insieme", house: "Tassorosso" }
     ]
   }
 ];
@@ -138,24 +141,8 @@ function makeAnswersRow(userId, step) {
   return row;
 }
 
-async function getHouseRole(guild, houseKey) {
-  const roleName = HOUSES[houseKey];
-
-  // ✅ robusto: assicura cache aggiornata
+async function fetchRoles(guild) {
   await guild.roles.fetch().catch(() => null);
-
-  const role = guild.roles.cache.find((r) => r.name === roleName);
-  if (!role) throw new Error(`Ruolo non trovato: ${roleName}`);
-  return role;
-}
-
-async function removeHouseRoles(member) {
-  const toRemove = member.roles.cache.filter((r) =>
-    Object.values(HOUSES).includes(r.name)
-  );
-  if (toRemove.size) {
-    await member.roles.remove([...toRemove.values()]);
-  }
 }
 
 function endSession(userId) {
@@ -164,15 +151,65 @@ function endSession(userId) {
   sessions.delete(userId);
 }
 
+async function getRoleByName(guild, roleName) {
+  await fetchRoles(guild);
+  const role = guild.roles.cache.find((r) => r.name === roleName);
+  if (!role) throw new Error(`Ruolo non trovato: ${roleName}`);
+  return role;
+}
+
+async function getHouseRole(guild, houseKey) {
+  const roleName = HOUSES[houseKey];
+  return getRoleByName(guild, roleName);
+}
+
+function memberHasAnyHouse(member) {
+  return member.roles.cache.some((r) => HOUSE_ROLE_NAMES.has(r.name));
+}
+
+async function removeHouseRoles(member) {
+  const toRemove = member.roles.cache.filter((r) => HOUSE_ROLE_NAMES.has(r.name));
+  if (toRemove.size) await member.roles.remove([...toRemove.values()]);
+}
+
+async function removeMuggleRoleIfAny(member, guild) {
+  const role = guild.roles.cache.find((r) => r.name === MUGGLE_ROLE_NAME);
+  if (role && member.roles.cache.has(role.id)) {
+    await member.roles.remove(role).catch(() => {});
+  }
+}
+
+async function ensureDefaultRole(member) {
+  const guild = member.guild;
+  await fetchRoles(guild);
+
+  // BOT => Spiriti del castello, niente babbani
+  if (member.user.bot) {
+    const botRole = guild.roles.cache.find((r) => r.name === BOT_ROLE_NAME);
+    if (botRole && !member.roles.cache.has(botRole.id)) {
+      await member.roles.add(botRole).catch(() => {});
+    }
+    await removeMuggleRoleIfAny(member, guild);
+    return;
+  }
+
+  // UMANI => se non hanno una Casa => Babbani
+  if (!memberHasAnyHouse(member)) {
+    const muggleRole = guild.roles.cache.find((r) => r.name === MUGGLE_ROLE_NAME);
+    if (muggleRole && !member.roles.cache.has(muggleRole.id)) {
+      await member.roles.add(muggleRole).catch(() => {});
+    }
+  } else {
+    // se hanno una Casa, non devono restare babbani
+    await removeMuggleRoleIfAny(member, guild);
+  }
+}
+
 /**
- * Opzione C: probabilità dinamiche
- * - softmax su scores
- * - rumore leggero per evitare risultati troppo deterministici
+ * softmax + rumore
  */
 function softmaxProbs(scores) {
   const vals = HOUSE_KEYS.map((k) => scores[k] ?? 0);
-
-  // temperatura: più alta = più random, più bassa = più deterministico
   const T = 1.15;
 
   const maxV = Math.max(...vals);
@@ -181,7 +218,6 @@ function softmaxProbs(scores) {
 
   let probs = exps.map((e) => e / sum);
 
-  // rumore leggero (±3%) e rinormalizza
   probs = probs.map((p) => Math.max(0.0001, p + (Math.random() * 0.06 - 0.03)));
   const s2 = probs.reduce((a, b) => a + b, 0) || 1;
   probs = probs.map((p) => p / s2);
@@ -209,7 +245,6 @@ function formatProbs(probMap) {
   const nameTop = HOUSES[top[0]];
   const nameSecond = HOUSES[second[0]];
 
-  // ✅ più “magico”: cita la seconda casa solo se è davvero vicina
   if (top[1] - second[1] < 0.12) {
     return `🎩 *Sento una forte inclinazione verso* **${nameTop}**… *ma anche* **${nameSecond}** *mi chiama…*`;
   }
@@ -239,18 +274,13 @@ async function cleanupChannel(guild) {
     const old = batch.filter((m) => m.createdTimestamp < cutoff);
 
     if (old.size > 0) {
-      const canBulk = old.filter(
-        (m) => now - m.createdTimestamp < 14 * 24 * 60 * 60 * 1000
-      );
-
+      const canBulk = old.filter((m) => now - m.createdTimestamp < 14 * 24 * 60 * 60 * 1000);
       if (canBulk.size > 0) {
         const res = await channel.bulkDelete(canBulk, true).catch(() => null);
         if (res) deletedCount += res.size ?? 0;
       }
 
-      const leftovers = old.filter(
-        (m) => now - m.createdTimestamp >= 14 * 24 * 60 * 60 * 1000
-      );
+      const leftovers = old.filter((m) => now - m.createdTimestamp >= 14 * 24 * 60 * 60 * 1000);
       for (const msg of leftovers.values()) {
         await msg.delete().catch(() => {});
         deletedCount += 1;
@@ -259,9 +289,8 @@ async function cleanupChannel(guild) {
 
     lastId = batch.last()?.id;
 
-    // ✅ ottimizzazione: se il più vecchio del batch è comunque “recente”, stop
+    // stop presto se siamo già in zona “recente”
     if (oldestInBatch && oldestInBatch.createdTimestamp >= cutoff) break;
-
     if (!lastId) break;
   }
 
@@ -284,17 +313,29 @@ const client = new Client({
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
+  // ✅ opzionale ma utile: all’avvio, sistemi i ruoli “default”
   for (const guild of client.guilds.cache.values()) {
+    await fetchRoles(guild);
+
+    // attenzione: su server grandi può essere pesante, ma è quello che chiedi (“tutti gli utenti…”)
+    await guild.members.fetch().catch(() => null);
+    for (const member of guild.members.cache.values()) {
+      await ensureDefaultRole(member);
+    }
+
     cleanupChannel(guild).catch(console.error);
-    setInterval(
-      () => cleanupChannel(guild).catch(console.error),
-      CLEANUP_EVERY_MINUTES * 60 * 1000
-    );
+    setInterval(() => cleanupChannel(guild).catch(console.error), CLEANUP_EVERY_MINUTES * 60 * 1000);
   }
 });
 
 // ===== USER JOIN =====
 client.on("guildMemberAdd", async (member) => {
+  // ✅ assegna subito Babbani / Spiriti del castello
+  await ensureDefaultRole(member);
+
+  // bot: niente quiz
+  if (member.user.bot) return;
+
   const channel = await member.guild.channels.fetch(QUIZ_CHANNEL_ID).catch(() => null);
   if (!channel) return;
 
@@ -323,16 +364,29 @@ client.on("messageCreate", async (message) => {
     const target = message.mentions.members.first();
     if (!target) return message.reply("Usa: `!resetcasa @utente`");
 
+    // ✅ cancella il comando dell’utente (così resta solo il messaggio “Casata rimossa…”)
+    // serve Manage Messages al bot nel canale
+    await message.delete().catch(() => {});
+
     endSession(target.id);
     await removeHouseRoles(target);
 
-    const channel = await message.guild.channels.fetch(QUIZ_CHANNEL_ID);
-    channel.send({
+    // dopo aver rimosso la casa, torna babbano (finché non rifà il quiz)
+    await ensureDefaultRole(target);
+
+    const channel = await message.guild.channels.fetch(QUIZ_CHANNEL_ID).catch(() => null);
+    if (!channel) return;
+
+    // ✅ 1) messaggio “casata rimossa…”
+    await channel.send({
+      content: `✅ Casata rimossa per ${target} `
+    });
+
+    // ✅ 2) subito dopo: quiz
+    await channel.send({
       content: `🎩 Il Cappello Parlante ti osserva ${target}, Mmh… testa interessante… vediamo dove metterti.`,
       components: [makeStartRow(target.id)]
     });
-
-    message.reply(`✅ Casa rimossa per ${target.user.username}`);
   }
 });
 
@@ -347,7 +401,6 @@ client.on("interactionCreate", async (interaction) => {
 
   // START
   if (type === "quiz_start") {
-    // se esiste già una sessione, evita re-start strani
     if (sessions.has(userId)) {
       return interaction.reply({ content: "🎩 Hai già iniziato il quiz!", ephemeral: true });
     }
@@ -359,11 +412,10 @@ client.on("interactionCreate", async (interaction) => {
       timeout: null
     };
 
-    // ✅ session TTL: se l’utente molla, puliamo
     session.timeout = setTimeout(() => endSession(userId), SESSION_TTL_MS);
     sessions.set(userId, session);
 
-    // ✅ niente spam: aggiorna il messaggio con il bottone (non reply)
+    // ✅ evita spam: aggiorna il messaggio col bottone
     return interaction.update({
       content: `${interaction.user} ${QUESTIONS[0].text}`,
       components: [makeAnswersRow(userId, 0)]
@@ -377,12 +429,17 @@ client.on("interactionCreate", async (interaction) => {
     const session = sessions.get(userId);
 
     if (!session) {
-      return interaction.reply({ content: "⏳ Sessione scaduta. Premi **Inizia il quiz** di nuovo.", ephemeral: true });
+      return interaction.reply({
+        content: "⏳ Sessione scaduta. Premi **Inizia il quiz** di nuovo.",
+        ephemeral: true
+      });
     }
 
-    // ✅ se qualcuno clicka roba “vecchia”, ignoriamo pulito
     if (session.step !== step) {
-      return interaction.reply({ content: "⚠️ Questa domanda non è più valida. Continua dal quiz attuale.", ephemeral: true });
+      return interaction.reply({
+        content: "⚠️ Questa domanda non è più valida. Continua dal quiz attuale.",
+        ephemeral: true
+      });
     }
 
     const houseKey = QUESTIONS[step].answers[idx].house;
@@ -404,10 +461,8 @@ client.on("interactionCreate", async (interaction) => {
     try {
       const probs = softmaxProbs(session.scores);
       const winner = weightedPick(probs);
-
       const role = await getHouseRole(interaction.guild, winner);
 
-      // pulisci sessione solo ora (dopo aver calcolato tutto)
       endSession(userId);
 
       await interaction.update({
@@ -423,13 +478,15 @@ client.on("interactionCreate", async (interaction) => {
 
       await sleep(1200);
 
-      // assegna ruolo + reveal finale
+      // ✅ assegna casa: rimuove case vecchie + babbani
       await removeHouseRoles(member);
+      await removeMuggleRoleIfAny(member, interaction.guild);
       await member.roles.add(role);
 
       await interaction.editReply({
         content: `🎩 **Il Cappello Parlante:** "HO DECISO!"\n✨ ${member} sei… **${role.name.toUpperCase()}**!`
       });
+
     } catch (e) {
       console.error(e);
       endSession(userId);
