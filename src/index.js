@@ -12,14 +12,17 @@ const {
 // ===== ENV =====
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const QUIZ_CHANNEL_ID = process.env.QUIZ_CHANNEL_ID;
+// ID specifico per il canale regole/benvenuto "freestyle"
+const RULES_CHANNEL_ID = process.env.RULES_CHANNEL_ID || "853208257984593951"; 
+
 const PREFIX = "!";
 
-// Cleanup config
+// Cleanup config (per il canale quiz)
 const CLEANUP_CHANNEL_ID = process.env.CLEANUP_CHANNEL_ID || QUIZ_CHANNEL_ID;
 const CLEANUP_EVERY_MINUTES = Number(process.env.CLEANUP_EVERY_MINUTES || 30);
-const DELETE_AFTER_MS = 6 * 60 * 60 * 1000; // ✅ 6 ore
+const DELETE_AFTER_MS = 6 * 60 * 60 * 1000; // 6 ore
 
-// Session timeout (anti utenti che mollano a metà)
+// Session timeout
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MS || 10 * 60 * 1000); // 10 min
 
 // Ruoli default
@@ -31,6 +34,24 @@ if (!DISCORD_TOKEN || !QUIZ_CHANNEL_ID) {
   process.exit(1);
 }
 
+// ===== TESTO BENVENUTO / REGOLE (Hogwarts tra amici) =====
+const RULES_MESSAGE_CONTENT = `🏰 **BENVENUTI A HOGWARTS (Quella sgangherata)** 🏰
+
+Cari studenti, maghi oscuri e babbani infiltrati,
+
+Benvenuti nel server. Il Preside vorrebbe che vi elencassi un milione di regole sulla disciplina, il decoro e l'uso corretto della bacchetta... *bla bla bla*.
+
+La verità? **Siamo tra amici.**
+Qui le regole sono poche ma sacre (come le Reliquie, ma meno pericolose):
+
+1️⃣ **Non fate i Dissennatori:** Non succhiate via la felicità altrui. Siate rispettosi, niente insulti pesanti o discriminazioni, altrimenti Azkaban vi sembrerà un villaggio turistico.
+2️⃣ **Niente Maledizioni Senza Perdono:** Evitate spam molesto o contenuti NSFW fuori dalle zone apposite.
+3️⃣ **Fate un po' quel che vi pare:** Per il resto, questo è il vostro castello. Scatenatevi, giocate, chiacchierate e divertitevi.
+
+✨ *Il Cappello Parlante vi osserva... ma chiude un occhio se offrite una Burrobirra.*
+
+*(Questo canale si autodistrugge: ogni messaggio non autorizzato verrà incenerito all'istante da un Incendio tattico)*`;
+
 // ===== CASE (NOMI ESATTI) =====
 const HOUSES = {
   Grifondoro: "❤️🦁 Grifondoro",
@@ -41,7 +62,7 @@ const HOUSES = {
 const HOUSE_KEYS = Object.keys(HOUSES);
 const HOUSE_ROLE_NAMES = new Set(Object.values(HOUSES));
 
-// ===== QUESTION BANK (serio / realistico) =====
+// ===== QUESTION BANK =====
 const QUESTIONS_BANK = [
   {
     text: "📜 Durante il primo mese a Hogwarts, cosa ti mette più a tuo agio nella routine quotidiana?",
@@ -352,7 +373,7 @@ function formatProbs(probMap) {
   return `🎩 *Vedo una strada piuttosto chiara davanti a te…* **${nameTop}**…`;
 }
 
-// ===== CLEANUP (6h) =====
+// ===== CLEANUP QUIZ CHANNEL (6h) =====
 async function cleanupChannel(guild) {
   const channel = await guild.channels.fetch(CLEANUP_CHANNEL_ID).catch(() => null);
   if (!channel || !channel.isTextBased()) return;
@@ -389,13 +410,41 @@ async function cleanupChannel(guild) {
     }
 
     lastId = batch.last()?.id;
-
     if (oldestInBatch && oldestInBatch.createdTimestamp >= cutoff) break;
     if (!lastId) break;
   }
 
   if (deletedCount > 0) {
     console.log(`🧹 Cleanup: deleted ${deletedCount} messages in channel ${channel.id}`);
+  }
+}
+
+// ===== RULES CHANNEL MANAGEMENT (Prefetto severo ma giusto) =====
+async function ensureRulesChannel(guild) {
+  const channel = await guild.channels.fetch(RULES_CHANNEL_ID).catch(() => null);
+  if (!channel || !channel.isTextBased()) {
+    console.log(`⚠️ Canale regole non trovato o non accessibile: ${RULES_CHANNEL_ID}`);
+    return;
+  }
+
+  // Prendi gli ultimi messaggi
+  const messages = await channel.messages.fetch({ limit: 20 });
+  
+  // Cerca se esiste già il messaggio del bot con il nostro testo
+  const botMsg = messages.find(
+    (m) => m.author.id === client.user.id && m.content.includes("BENVENUTI A HOGWARTS")
+  );
+
+  // Cancella TUTTI i messaggi che non sono quello "ufficiale" del bot
+  for (const [id, msg] of messages) {
+    if (!botMsg || msg.id !== botMsg.id) {
+      await msg.delete().catch(() => {});
+    }
+  }
+
+  // Se il messaggio ufficiale non c'era, mandalo
+  if (!botMsg) {
+    await channel.send(RULES_MESSAGE_CONTENT);
   }
 }
 
@@ -416,12 +465,16 @@ client.once("ready", async () => {
   for (const guild of client.guilds.cache.values()) {
     await fetchRoles(guild);
 
-    // Assegna Babbani / Spiriti a tutti (come richiesto)
+    // Assegna Babbani / Spiriti
     await guild.members.fetch().catch(() => null);
     for (const member of guild.members.cache.values()) {
       await ensureDefaultRole(member);
     }
 
+    // Gestione Canale Regole
+    await ensureRulesChannel(guild);
+
+    // Cleanup Canale Quiz
     cleanupChannel(guild).catch(console.error);
     setInterval(
       () => cleanupChannel(guild).catch(console.error),
@@ -434,7 +487,6 @@ client.once("ready", async () => {
 client.on("guildMemberAdd", async (member) => {
   await ensureDefaultRole(member);
 
-  // bot: niente quiz
   if (member.user.bot) return;
 
   const channel = await member.guild.channels.fetch(QUIZ_CHANNEL_ID).catch(() => null);
@@ -446,8 +498,16 @@ client.on("guildMemberAdd", async (member) => {
   });
 });
 
-// ===== COMMANDS (!) =====
+// ===== MESSAGES & COMMANDS =====
 client.on("messageCreate", async (message) => {
+  // 1. PROTEZIONE CANALE REGOLE
+  // Se qualcuno scrive nel canale regole (e non è il bot), cancella subito.
+  if (message.channel.id === RULES_CHANNEL_ID && message.author.id !== client.user.id) {
+    await message.delete().catch(() => {});
+    return;
+  }
+
+  // 2. Comandi normali
   if (message.author.bot) return;
   if (!message.content.startsWith(PREFIX)) return;
 
@@ -465,20 +525,18 @@ client.on("messageCreate", async (message) => {
     const target = message.mentions.members.first();
     if (!target) return message.reply("Usa: `!resetcasa @utente`");
 
-    // ✅ elimina il comando dell’utente (serve Manage Messages al bot)
+    // elimina il comando
     await message.delete().catch(() => {});
 
     endSession(target.id);
     await removeHouseRoles(target);
-    await ensureDefaultRole(target); // torna babbano fino a nuovo quiz
+    await ensureDefaultRole(target); 
 
     const channel = await message.guild.channels.fetch(QUIZ_CHANNEL_ID).catch(() => null);
     if (!channel) return;
 
-    // ✅ messaggio “pulito” (senza traccia del comando)
     await channel.send({ content: `✅ Casata rimossa da ${target}` });
 
-    // ✅ subito dopo parte il quiz
     await channel.send({
       content: `🎩 Il Cappello Parlante ti osserva ${target}, Mmh… testa interessante… vediamo dove metterti.`,
       components: [makeStartRow(target.id)]
@@ -514,7 +572,6 @@ client.on("interactionCreate", async (interaction) => {
     session.timeout = setTimeout(() => endSession(userId), SESSION_TTL_MS);
     sessions.set(userId, session);
 
-    // ✅ aggiorna lo stesso messaggio, niente spam
     return interaction.update({
       content: `${interaction.user} ${session.questions[0].text}`,
       components: [makeAnswersRow(userId, 0, session)]
